@@ -6,7 +6,9 @@ from ics import Calendar
 from dotenv import load_dotenv
 
 # Cargar variables desde .env
-load_dotenv()
+ENV_PATH = os.path.join(os.path.dirname(__file__), "config", ".env")
+load_dotenv(ENV_PATH)
+# load_dotenv()
 
 # ============ CONFIG ============
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")  # requerido
@@ -19,7 +21,29 @@ STATE_FILE    = os.getenv("UPDATES_STATE", "last_update_id.json")
 MAX_NEW_PER_RUN = int(os.getenv("MAX_NEW_PER_RUN", "30"))
 DEBUG_NOTIFY_NEXT = os.getenv("DEBUG_NOTIFY_NEXT", "0") in ("1", "true", "True", "YES", "yes")
 
-WELCOME_TEXT = "¡Apuntado para recibir avisos del Betis! ⚽️"
+# WELCOME_TEXT = "¡Apuntado para recibir avisos del Betis! ⚽️"
+
+WELCOME_TEXT = (
+    "¡Apuntado para recibir avisos del Betis! ⚽️\n\n"
+    "Comandos disponibles:\n"
+    "• /stop — darte de baja y dejar de recibir avisos\n"
+    "• (Para volver a darte de alta) escríbeme cualquier mensaje\n"
+)
+
+WELCOME_BACK_TEXT = (
+    "¡Te hemos vuelto a activar! ✅\n"
+    "Recibirás avisos el día antes y el mismo día del partido.\n"
+    "Si quieres darte de baja, usa /stop."
+)
+
+HELP_TEXT = (
+    "Ayuda del bot ⚽️\n\n"
+    "• Recibirás avisos el día antes y el mismo día del partido.\n"
+    "• /start — darte de alta / reactivar si estabas de baja.\n"
+    "• /stop — darte de baja y no recibir avisos.\n"
+    "• /help — ver esta ayuda.\n"
+)
+
 GOODBYE_TEXT = "Has sido dado de baja. Si quieres volver a apuntarte, envíame cualquier mensaje."
 ADMIN_ALERT_TITLE = "⚠️ Alta masiva pendiente de revisión"
 ADMIN_ALERT_BODY  = "Se han detectado {n} nuevas altas. Están en pending_review.json. No se añadieron automáticamente."
@@ -139,9 +163,15 @@ STOP_KEYWORDS = ("/stop", "stop", "baja", "unsubscribe")
 
 def drain_updates_and_collect(users):
     """
-    Devuelve:
-      - truly_new: usuarios nuevos para alta (no existentes aún)
+    Procesa updates y devuelve:
+      - truly_new: altas NUEVAS (solo si envían /start y no existían)
       - deactivated_ids: chat_ids dados de baja (/stop o expulsión)
+      - reactivated_ids: chat_ids reactivados (enviaron /start teniendo enabled:false)
+    Reglas:
+      - /start -> alta o reactivación
+      - /stop -> baja
+      - /help -> mostramos ayuda
+      - cualquier otro texto: mostramos ayuda SOLO en chats privados; NO da de alta.
     """
     base = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
     params = {
@@ -155,8 +185,9 @@ def drain_updates_and_collect(users):
 
     data = tg_get(base, params)
     max_update_id = last
-    new_users_map = {}
+    new_users_map = {}    # chat_id -> dict (posibles ALTAS nuevas)
     deactivated_ids = set()
+    reactivated_ids = set()
 
     for upd in data.get("result", []):
         uid = upd["update_id"]
@@ -166,17 +197,38 @@ def drain_updates_and_collect(users):
         if "message" in upd and "chat" in upd["message"]:
             msg = upd["message"]
             chat = msg["chat"]
+            chat_type = chat.get("type", "private")  # "private", "group", "supergroup", "channel"
             chat_id = str(chat["id"])
             name = chat.get("title") or chat.get("first_name") or chat.get("username") or ""
-            text = (msg.get("text") or "").strip().lower()
+            text = (msg.get("text") or "").strip()
 
-            if any(text.startswith(k) for k in STOP_KEYWORDS):
+            lower = text.lower()
+
+            if lower.startswith("/start"):
+                u = find_user(users, chat_id)
+                if u:
+                    # ya existe: si estaba de baja, reactivar
+                    if not u.get("enabled", True):
+                        u["enabled"] = True
+                        reactivated_ids.add(chat_id)
+                else:
+                    # alta nueva
+                    new_users_map[chat_id] = {"chat_id": chat_id, "name": name, "enabled": True, "is_admin": False}
+
+            elif any(lower.startswith(k) for k in STOP_KEYWORDS):
                 u = find_user(users, chat_id)
                 if u and u.get("enabled", True):
                     u["enabled"] = False
                     deactivated_ids.add(chat_id)
+
+            elif lower.startswith("/help"):
+                # responder ayuda (no tocamos alta/baja)
+                send_message(chat_id, HELP_TEXT)
+
             else:
-                new_users_map[chat_id] = {"chat_id": chat_id, "name": name, "enabled": True, "is_admin": False}
+                # Texto desconocido: respondemos ayuda SOLO en privados (no spamear grupos)
+                if chat_type == "private":
+                    send_message(chat_id, HELP_TEXT)
 
         # Cambios de estado (añadido/expulsado de grupos)
         if "my_chat_member" in upd:
@@ -185,8 +237,10 @@ def drain_updates_and_collect(users):
             chat_id = str(chat["id"])
             name = chat.get("title") or ""
             if status in ("administrator", "member"):
-                new_users_map[chat_id] = {"chat_id": chat_id, "name": name, "enabled": True, "is_admin": False}
+                # Para grupos, exigimos /start para alta; no auto-alta por estar dentro
+                pass
             else:
+                # left/kicked/restricted: desactivar si existe
                 u = find_user(users, chat_id)
                 if u and u.get("enabled", True):
                     u["enabled"] = False
@@ -195,8 +249,10 @@ def drain_updates_and_collect(users):
     if max_update_id is not None:
         save_last_update_id(max_update_id)
 
+    # Solo ALTAS nuevas auténticas (que no existían antes)
     truly_new = [u for cid, u in new_users_map.items() if not user_exists(users, cid)]
-    return truly_new, list(deactivated_ids)
+    return truly_new, list(deactivated_ids), list(reactivated_ids)
+
 
 # ---------- Calendario ----------
 def fetch_calendar():
@@ -279,20 +335,30 @@ def main():
         cal, next_ev = None, None
     notify_admins(users, build_run_ping(next_ev))
 
-    # 2) Drena updates: altas y bajas
-    new_users, deactivated_ids = drain_updates_and_collect(users)
+    # 2) Drena updates: altas, bajas, reactivaciones
+    new_users, deactivated_ids, reactivated_ids = drain_updates_and_collect(users)
 
     # 2.1) Aplica bajas y confirma (privados)
     if deactivated_ids:
-        save_users(users)
+        save_users(users)  # guardamos primero
         for cid in deactivated_ids:
             try:
-                if not str(cid).startswith("-"):
+                if not str(cid).startswith("-"):  # solo chats privados
                     send_message(cid, GOODBYE_TEXT)
             except Exception:
                 pass
 
-    # 2.2) Altas masivas vs normales
+    # 2.2) Reactivaciones (privados/grupos)
+    if reactivated_ids:
+        save_users(users)
+        for cid in reactivated_ids:
+            try:
+                if not str(cid).startswith("-"):
+                    send_message(cid, WELCOME_BACK_TEXT)
+            except Exception:
+                pass
+
+    # 2.3) Altas masivas vs normales
     if new_users:
         if len(new_users) > MAX_NEW_PER_RUN:
             pending = load_json(PENDING_JSON, [])
@@ -307,6 +373,7 @@ def main():
             save_users(users)
             for u in new_users:
                 send_message(u["chat_id"], WELCOME_TEXT)
+
 
     # 3) Eventos: hoy y mañana
     try:
