@@ -27,7 +27,8 @@ WELCOME_TEXT = (
     "¡Apuntado para recibir avisos del Betis! ⚽️\n\n"
     "Comandos disponibles:\n"
     "• /stop — darte de baja y dejar de recibir avisos\n"
-    "• (Para volver a darte de alta) escríbeme cualquier mensaje\n"
+    "• /start — volver a darte de alta si estabas de baja\n"
+    "• /help — ver esta ayuda\n"
 )
 
 WELCOME_BACK_TEXT = (
@@ -44,11 +45,26 @@ HELP_TEXT = (
     "• /help — ver esta ayuda.\n"
 )
 
-GOODBYE_TEXT = "Has sido dado de baja. Si quieres volver a apuntarte, envíame cualquier mensaje."
+GOODBYE_TEXT = "Has sido dado de baja. Si quieres volver a apuntarte, escribe /start."
 ADMIN_ALERT_TITLE = "⚠️ Alta masiva pendiente de revisión"
 ADMIN_ALERT_BODY  = "Se han detectado {n} nuevas altas. Están en pending_review.json. No se añadieron automáticamente."
 SEND_ERRORS_TITLE = "⚠️ Incidencias en el envío de recordatorios"
 RUN_PING_TITLE    = "🟢 Ejecución realizada"
+
+# Mensajes de eventos
+# HEADER_TODAY = "💚🤍  ¡DÍA DE BETIS!  🤍💚"
+# SUBHEADER_TODAY = "🔥 Partido(s) de HOY:"
+# FOOTER_TODAY = "🎉 ¡Mucho Betis! #DíaDeBetis"
+
+# HEADER_TOMORROW = "⏰ Recordatorio: mañana juega el Betis"
+HEADER_TODAY = "💚🤍  <b>¡DÍA DE BETIS!</b>  🤍💚"
+SUBHEADER_TODAY = "<b>🔥 Partido(s) de HOY:</b>"
+FOOTER_TODAY = "🎉 ¡Mucho Betis! #DíaDeBetis"
+
+HEADER_TOMORROW = "⏰ <b>Recordatorio: mañana juega el Betis</b>"
+
+
+
 # ===============================
 
 def require_env(var):
@@ -310,6 +326,24 @@ def build_msg(header, events):
         lines.append(f"• {title} — {hora}" + (f" ({place})" if place else ""))
     return "\n".join(lines)
 
+def build_msg_today(events):
+    lines = [HEADER_TODAY, "", SUBHEADER_TODAY]  # línea en blanco tras cabecera
+    for title, hora, place in sorted(events, key=lambda x: x[1]):
+        place_txt = f" ({place})" if place else ""
+        lines.append(f"• <b>{title}</b> — {hora}{place_txt}")
+    lines.append("")
+    lines.append(FOOTER_TODAY)
+    return "\n".join(lines)
+
+def build_msg_tomorrow(events):
+    lines = [HEADER_TOMORROW, ""]
+    for title, hora, place in sorted(events, key=lambda x: x[1]):
+        place_txt = f" ({place})" if place else ""
+        lines.append(f"• <b>{title}</b> — {hora}{place_txt}")
+    return "\n".join(lines)
+
+
+
 def build_run_ping(next_ev=None):
     now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
     lines = [f"{RUN_PING_TITLE}", f"Fecha/Hora: {now_str} ({TZ_STR})"]
@@ -381,11 +415,17 @@ def main():
     except Exception:
         ev_today, ev_tomorrow = [], []
 
+    # msgs = []
+    # if ev_today:
+    #     msgs.append(build_msg("¡Juega el Betis HOY!", ev_today))
+    # if ev_tomorrow:
+    #     msgs.append(build_msg("Recordatorio: mañana hay partido", ev_tomorrow))
     msgs = []
     if ev_today:
-        msgs.append(build_msg("¡Juega el Betis HOY!", ev_today))
+        msgs.append(build_msg_today(ev_today))
     if ev_tomorrow:
-        msgs.append(build_msg("Recordatorio: mañana hay partido", ev_tomorrow))
+        msgs.append(build_msg_tomorrow(ev_tomorrow))
+
 
     if not msgs:
         print("No hay partidos hoy ni mañana. No se envían avisos.")
