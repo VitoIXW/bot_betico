@@ -7,8 +7,11 @@ from dotenv import load_dotenv
 import mimetypes
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 # Cargar variables desde .env
-ENV_PATH = os.path.join(os.path.dirname(__file__), "config", ".env")
+ENV_PATH = os.path.join(BASE_DIR, "config", ".env")
 load_dotenv(ENV_PATH)
 # load_dotenv()
 
@@ -17,13 +20,23 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")  # requerido
 ICS_URL      = os.getenv("ICS_URL")       # requerido
 TZ_STR       = os.getenv("TZ", "Europe/Madrid")
 
-USERS_JSON    = os.getenv("USERS_JSON", "users.json")
-PENDING_JSON  = os.getenv("PENDING_JSON", "pending_review.json")
-STATE_FILE    = os.getenv("UPDATES_STATE", "last_update_id.json")
+# USERS_JSON    = os.getenv("USERS_JSON", "users.json")
+# PENDING_JSON  = os.getenv("PENDING_JSON", "pending_review.json")
+# STATE_FILE    = os.getenv("UPDATES_STATE", "last_update_id.json")
 MAX_NEW_PER_RUN = int(os.getenv("MAX_NEW_PER_RUN", "30"))
 DEBUG_NOTIFY_NEXT = os.getenv("DEBUG_NOTIFY_NEXT", "0") in ("1", "true", "True", "YES", "yes")
 
-BETIS_GIF = os.getenv("BETIS_GIF", "media/betis.gif")
+def to_abs(path, default_rel):
+    p = os.getenv(path, default_rel)
+    return p if os.path.isabs(p) else os.path.join(BASE_DIR, p)
+
+USERS_JSON   = to_abs("USERS_JSON",   "data/users.json")
+PENDING_JSON = to_abs("PENDING_JSON", "data/pending_review.json")
+STATE_FILE   = to_abs("UPDATES_STATE","data/last_update_id.json")
+LOG_DIR      = to_abs("LOG_DIR",      "logs")
+BETIS_GIF    = to_abs("BETIS_GIF",    "media/betis.gif")
+
+# BETIS_GIF = os.getenv("BETIS_GIF", "media/betis.gif")
 
 
 # WELCOME_TEXT = "¡Apuntado para recibir avisos del Betis! ⚽️"
@@ -69,7 +82,7 @@ FOOTER_TODAY = "🎉 ¡Mucho Betis! #DíaDeBetis"
 HEADER_TOMORROW = "⏰ <b>Recordatorio: mañana juega el Betis</b>"
 
 # ---- LOGGING POR EJECUCIÓN ----
-LOG_DIR = os.getenv("LOG_DIR", "logs")
+# LOG_DIR = os.getenv("LOG_DIR", "logs")
 
 def ensure_log_dir():
     os.makedirs(LOG_DIR, exist_ok=True)

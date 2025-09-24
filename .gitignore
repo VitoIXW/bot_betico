@@ -3,3 +3,8 @@ prueba*.py
 data/users.json
 data/last_update_id.json
 logs/*
+
+# Python / venv
+.venv/
+__pycache__/
+*.pyc
