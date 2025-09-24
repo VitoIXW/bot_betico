@@ -354,6 +354,8 @@ def build_msg_tomorrow(events):
         lines.append(f"• <b>{title}</b> — {hora}{place_txt}")
     return "\n".join(lines)
 
+#esta era para si el gif es una url
+
 # def send_gif(chat_id, gif_url, caption=None):
 #     base = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendAnimation"
 #     payload = {
