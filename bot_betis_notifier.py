@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 import pytz
 from ics import Calendar
 from dotenv import load_dotenv
+import mimetypes
+
 
 # Cargar variables desde .env
 ENV_PATH = os.path.join(os.path.dirname(__file__), "config", ".env")
@@ -20,6 +22,9 @@ PENDING_JSON  = os.getenv("PENDING_JSON", "pending_review.json")
 STATE_FILE    = os.getenv("UPDATES_STATE", "last_update_id.json")
 MAX_NEW_PER_RUN = int(os.getenv("MAX_NEW_PER_RUN", "30"))
 DEBUG_NOTIFY_NEXT = os.getenv("DEBUG_NOTIFY_NEXT", "0") in ("1", "true", "True", "YES", "yes")
+
+BETIS_GIF = os.getenv("BETIS_GIF", "media/betis.gif")
+
 
 # WELCOME_TEXT = "¡Apuntado para recibir avisos del Betis! ⚽️"
 
@@ -320,10 +325,17 @@ def fetch_next_event(cal=None):
         "place": place
     }
 
-def build_msg(header, events):
-    lines = [f"⚽️ <b>{header}</b>"]
-    for title, hora, place in sorted(events, key=lambda x: x[1]):
-        lines.append(f"• {title} — {hora}" + (f" ({place})" if place else ""))
+
+def build_run_ping(next_ev=None):
+    now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    lines = [f"{RUN_PING_TITLE}", f"Fecha/Hora: {now_str} ({TZ_STR})"]
+    if DEBUG_NOTIFY_NEXT:
+        if next_ev:
+            place = f" ({next_ev['place']})" if next_ev.get("place") else ""
+            lines.append("Próximo partido (DEBUG):")
+            lines.append(f"• {next_ev['title']} — {next_ev['date']} {next_ev['time']}{place}")
+        else:
+            lines.append("Próximo partido (DEBUG): no encontrado en el feed.")
     return "\n".join(lines)
 
 def build_msg_today(events):
@@ -342,19 +354,68 @@ def build_msg_tomorrow(events):
         lines.append(f"• <b>{title}</b> — {hora}{place_txt}")
     return "\n".join(lines)
 
+# def send_gif(chat_id, gif_url, caption=None):
+#     base = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendAnimation"
+#     payload = {
+#         "chat_id": chat_id,
+#         "animation": gif_url,
+#     }
+#     if caption:
+#         payload["caption"] = caption
+#         payload["parse_mode"] = "HTML"
+#     try:
+#         tg_post(base, payload)
+#         return True, None
+#     except Exception as e:
+#         return False, str(e)
 
 
-def build_run_ping(next_ev=None):
-    now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-    lines = [f"{RUN_PING_TITLE}", f"Fecha/Hora: {now_str} ({TZ_STR})"]
-    if DEBUG_NOTIFY_NEXT:
-        if next_ev:
-            place = f" ({next_ev['place']})" if next_ev.get("place") else ""
-            lines.append("Próximo partido (DEBUG):")
-            lines.append(f"• {next_ev['title']} — {next_ev['date']} {next_ev['time']}{place}")
-        else:
-            lines.append("Próximo partido (DEBUG): no encontrado en el feed.")
-    return "\n".join(lines)
+def send_gif(chat_id, src, caption=None):
+    """
+    src puede ser:
+      - URL http(s)://
+      - ruta local a un .gif/.mp4 (se sube por multipart)
+    """
+    base = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendAnimation"
+
+    # Caso URL
+    if src.startswith("http://") or src.startswith("https://"):
+        payload = {"chat_id": chat_id, "animation": src}
+        if caption:
+            payload["caption"] = caption
+            payload["parse_mode"] = "HTML"
+        try:
+            r = requests.post(base, data=payload, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                raise RuntimeError(data)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    # Caso fichero local
+    if not os.path.isfile(src):
+        return False, f"Archivo no encontrado: {src}"
+
+    mime = mimetypes.guess_type(src)[0] or "application/octet-stream"
+    try:
+        with open(src, "rb") as fh:
+            files = {"animation": (os.path.basename(src), fh, mime)}
+            data = {"chat_id": chat_id}
+            if caption:
+                data["caption"] = caption
+                data["parse_mode"] = "HTML"
+            r = requests.post(base, data=data, files=files, timeout=60)
+            r.raise_for_status()
+            resp = r.json()
+            if not resp.get("ok"):
+                raise RuntimeError(resp)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 
 # ---------- Main ----------
 def main():
@@ -408,41 +469,47 @@ def main():
             for u in new_users:
                 send_message(u["chat_id"], WELCOME_TEXT)
 
-
     # 3) Eventos: hoy y mañana
     try:
         ev_today, ev_tomorrow = fetch_events_today_and_tomorrow(cal)
     except Exception:
         ev_today, ev_tomorrow = [], []
 
-    # msgs = []
-    # if ev_today:
-    #     msgs.append(build_msg("¡Juega el Betis HOY!", ev_today))
-    # if ev_tomorrow:
-    #     msgs.append(build_msg("Recordatorio: mañana hay partido", ev_tomorrow))
-    msgs = []
-    if ev_today:
-        msgs.append(build_msg_today(ev_today))
-    if ev_tomorrow:
-        msgs.append(build_msg_tomorrow(ev_tomorrow))
-
-
-    if not msgs:
+    if not ev_today and not ev_tomorrow:
         print("No hay partidos hoy ni mañana. No se envían avisos.")
         return
 
-    # 4) Envío y reporte de fallos
     enabled = [u for u in users if u.get("enabled", True)]
-    print(f"Usuarios habilitados: {len(enabled)} | Mensajes: {len(msgs)}")
+    print(f"Usuarios habilitados: {len(enabled)}")
 
     failures = []
-    for u in enabled:
-        for m in msgs:
-            ok, err = send_message(u["chat_id"], m)
+
+    # --- Partidos HOY: texto + GIF ---
+    if ev_today:
+        msg_today = build_msg_today(ev_today)
+        for u in enabled:
+            ok, err = send_message(u["chat_id"], msg_today)
             if not ok:
                 failures.append({"chat_id": u["chat_id"], "name": u.get("name",""), "error": err})
             time.sleep(0.1)
 
+        # GIF motivacional
+        for u in enabled:
+            ok, err = send_gif(u["chat_id"], BETIS_GIF, caption="💚🤍 ¡Arriba ese Betis! 🤍💚")
+            if not ok:
+                failures.append({"chat_id": u["chat_id"], "name": u.get("name",""), "error": err})
+            time.sleep(0.1)
+
+    # --- Partidos MAÑANA: solo texto ---
+    if ev_tomorrow:
+        msg_tomorrow = build_msg_tomorrow(ev_tomorrow)
+        for u in enabled:
+            ok, err = send_message(u["chat_id"], msg_tomorrow)
+            if not ok:
+                failures.append({"chat_id": u["chat_id"], "name": u.get("name",""), "error": err})
+            time.sleep(0.1)
+
+    # 4) Reporte de fallos a admins (si hubo)
     if failures:
         lines = [f"{SEND_ERRORS_TITLE}", f"Total fallos: {len(failures)}"]
         for f in failures[:10]:
@@ -450,6 +517,7 @@ def main():
         if len(failures) > 10:
             lines.append(f"... y {len(failures)-10} más.")
         notify_admins(users, "\n".join(lines))
+
 
 if __name__ == "__main__":
     main()
