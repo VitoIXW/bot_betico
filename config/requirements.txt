@@ -1,0 +1,8 @@
+# Core
+requests>=2.31
+python-dotenv>=1.0.1
+ics>=0.7.2
+pytz>=2024.1
+
+# (Opcional, útil en Windows para zonas horarias)
+# tzdata>=2024.1; platform_system == "Windows"
