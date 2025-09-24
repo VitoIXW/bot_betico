@@ -68,6 +68,22 @@ FOOTER_TODAY = "🎉 ¡Mucho Betis! #DíaDeBetis"
 
 HEADER_TOMORROW = "⏰ <b>Recordatorio: mañana juega el Betis</b>"
 
+# ---- LOGGING POR EJECUCIÓN ----
+LOG_DIR = os.getenv("LOG_DIR", "logs")
+
+def ensure_log_dir():
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+def new_log_file():
+    ensure_log_dir()
+    ts = datetime.now(tz).strftime("%Y-%m-%d_%H-%M-%S")
+    return os.path.join(LOG_DIR, f"run_{ts}.log")
+
+def write_log(path, *parts):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(" ".join(str(p) for p in parts) + "\n")
+
+
 
 
 # ===============================
@@ -421,39 +437,62 @@ def send_gif(chat_id, src, caption=None):
 
 # ---------- Main ----------
 def main():
+    # LOG de esta ejecución
+    log_file = new_log_file()
+    write_log(log_file, "==== EJECUCIÓN BOT BETIS ====")
+    write_log(log_file, "Inicio:", datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z"))
+
     # 1) Carga usuarios
     users = load_users()
+    enabled_count = len([u for u in users if u.get("enabled", True)])
+    admins = [ (u["chat_id"], u.get("name","")) for u in get_admins(users) ]
+    write_log(log_file, f"Usuarios cargados: {len(users)} | habilitados: {enabled_count}")
+    write_log(log_file, f"Admins: {admins if admins else '—'}")
 
-    # 1.1) Ping a admins (ejecución +, si procede, próximo partido)
+    # 1.1) Ping a admins (ejecución + próximo partido si DEBUG)
     try:
         cal = fetch_calendar()
         next_ev = fetch_next_event(cal)
-    except Exception:
+    except Exception as e:
         cal, next_ev = None, None
+        write_log(log_file, "[ERROR] fetch_calendar/fetch_next_event:", e)
     notify_admins(users, build_run_ping(next_ev))
 
     # 2) Drena updates: altas, bajas, reactivaciones
-    new_users, deactivated_ids, reactivated_ids = drain_updates_and_collect(users)
+    try:
+        new_users, deactivated_ids, reactivated_ids = drain_updates_and_collect(users)
+    except Exception as e:
+        write_log(log_file, "[ERROR] drain_updates_and_collect:", e)
+        new_users, deactivated_ids, reactivated_ids = [], [], []
 
-    # 2.1) Aplica bajas y confirma (privados)
+    if new_users:
+        write_log(log_file, f"Nuevas altas recibidas: {len(new_users)} ->", [(u['chat_id'], u.get('name','')) for u in new_users])
     if deactivated_ids:
-        save_users(users)  # guardamos primero
+        write_log(log_file, f"Bajas solicitadas: {len(deactivated_ids)} ->", deactivated_ids)
+    if reactivated_ids:
+        write_log(log_file, f"Reactivaciones: {len(reactivated_ids)} ->", reactivated_ids)
+
+    # 2.1) Aplica bajas y confirma
+    if deactivated_ids:
+        save_users(users)  # guardamos antes de notificar
         for cid in deactivated_ids:
             try:
-                if not str(cid).startswith("-"):  # solo chats privados
-                    send_message(cid, GOODBYE_TEXT)
-            except Exception:
-                pass
+                if not str(cid).startswith("-"):
+                    ok, err = send_message(cid, GOODBYE_TEXT)
+                    write_log(log_file, "[BAJA OK]" if ok else "[BAJA FAIL]", cid, err or "")
+            except Exception as e:
+                write_log(log_file, "[BAJA EXC]", cid, e)
 
-    # 2.2) Reactivaciones (privados/grupos)
+    # 2.2) Reactivaciones
     if reactivated_ids:
         save_users(users)
         for cid in reactivated_ids:
             try:
                 if not str(cid).startswith("-"):
-                    send_message(cid, WELCOME_BACK_TEXT)
-            except Exception:
-                pass
+                    ok, err = send_message(cid, WELCOME_BACK_TEXT)
+                    write_log(log_file, "[REACT OK]" if ok else "[REACT FAIL]", cid, err or "")
+            except Exception as e:
+                write_log(log_file, "[REACT EXC]", cid, e)
 
     # 2.3) Altas masivas vs normales
     if new_users:
@@ -465,53 +504,80 @@ def main():
             pending.extend(new_users)
             save_json(PENDING_JSON, pending)
             notify_admins(users, f"{ADMIN_ALERT_TITLE}\n\n{ADMIN_ALERT_BODY.format(n=len(new_users))}")
+            write_log(log_file, "[ALTAS BLOQUEADAS] Pasadas a pending_review.json:", len(new_users))
         else:
             users.extend(new_users)
             save_users(users)
             for u in new_users:
-                send_message(u["chat_id"], WELCOME_TEXT)
+                ok, err = send_message(u["chat_id"], WELCOME_TEXT)
+                write_log(log_file, "[WELCOME OK]" if ok else "[WELCOME FAIL]", u["chat_id"], u.get("name",""), err or "")
 
     # 3) Eventos: hoy y mañana
     try:
         ev_today, ev_tomorrow = fetch_events_today_and_tomorrow(cal)
-    except Exception:
+    except Exception as e:
         ev_today, ev_tomorrow = [], []
+        write_log(log_file, "[ERROR] fetch_events_today_and_tomorrow:", e)
+
+    if ev_today:
+        write_log(log_file, "Eventos HOY:", ev_today)
+    if ev_tomorrow:
+        write_log(log_file, "Eventos MAÑANA:", ev_tomorrow)
 
     if not ev_today and not ev_tomorrow:
-        print("No hay partidos hoy ni mañana. No se envían avisos.")
+        write_log(log_file, "No hay partidos hoy ni mañana. No se envían avisos.")
+        write_log(log_file, "==== FIN EJECUCIÓN ====")
         return
 
     enabled = [u for u in users if u.get("enabled", True)]
-    print(f"Usuarios habilitados: {len(enabled)}")
+    write_log(log_file, f"Usuarios a notificar: {len(enabled)}")
 
     failures = []
 
     # --- Partidos HOY: texto + GIF ---
     if ev_today:
         msg_today = build_msg_today(ev_today)
+        write_log(log_file, "--- MENSAJE HOY ---\n", msg_today, "\n--- FIN MENSAJE HOY ---")
         for u in enabled:
             ok, err = send_message(u["chat_id"], msg_today)
-            if not ok:
+            if ok:
+                write_log(log_file, "[SEND TODAY OK]", u["chat_id"], u.get("name",""))
+            else:
                 failures.append({"chat_id": u["chat_id"], "name": u.get("name",""), "error": err})
+                write_log(log_file, "[SEND TODAY FAIL]", u["chat_id"], u.get("name",""), err or "")
             time.sleep(0.1)
 
-        # GIF motivacional
-        for u in enabled:
-            ok, err = send_gif(u["chat_id"], BETIS_GIF, caption="💚🤍 ¡Arriba ese Betis! 🤍💚")
-            if not ok:
-                failures.append({"chat_id": u["chat_id"], "name": u.get("name",""), "error": err})
-            time.sleep(0.1)
+        # GIF motivacional (si está configurado)
+        if BETIS_GIF:
+            for u in enabled:
+                ok, err = send_gif(u["chat_id"], BETIS_GIF, caption="💚🤍 ¡Arriba ese Betis! 🤍💚")
+                if ok:
+                    write_log(log_file, "[SEND GIF OK]", u["chat_id"], u.get("name",""))
+                else:
+                    failures.append({"chat_id": u["chat_id"], "name": u.get("name",""), "error": err})
+                    write_log(log_file, "[SEND GIF FAIL]", u["chat_id"], u.get("name",""), err or "")
+                time.sleep(0.1)
+        else:
+            write_log(log_file, "[GIF OMITIDO] BETIS_GIF vacío")
 
     # --- Partidos MAÑANA: solo texto ---
     if ev_tomorrow:
         msg_tomorrow = build_msg_tomorrow(ev_tomorrow)
+        write_log(log_file, "--- MENSAJE MAÑANA ---\n", msg_tomorrow, "\n--- FIN MENSAJE MAÑANA ---")
         for u in enabled:
             ok, err = send_message(u["chat_id"], msg_tomorrow)
-            if not ok:
+            if ok:
+                write_log(log_file, "[SEND TOMORROW OK]", u["chat_id"], u.get("name",""))
+            else:
                 failures.append({"chat_id": u["chat_id"], "name": u.get("name",""), "error": err})
+                write_log(log_file, "[SEND TOMORROW FAIL]", u["chat_id"], u.get("name",""), err or "")
             time.sleep(0.1)
 
-    # 4) Reporte de fallos a admins (si hubo)
+    # 4) Resumen + reporte a admins
+    ok_count = (len(enabled) * (1 if ev_tomorrow else 0) + len(enabled) * (1 if ev_today else 0)) - len(failures)
+    write_log(log_file, f"Fallos totales: {len(failures)}")
+    write_log(log_file, "==== FIN EJECUCIÓN ====")
+
     if failures:
         lines = [f"{SEND_ERRORS_TITLE}", f"Total fallos: {len(failures)}"]
         for f in failures[:10]:

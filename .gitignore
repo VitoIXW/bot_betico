@@ -2,3 +2,4 @@ config/.env
 prueba*.py
 data/users.json
 data/last_update_id.json
+logs/*
